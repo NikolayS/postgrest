@@ -66,17 +66,20 @@ resetUserId = H.unitEx [H.stmt|reset user_vars.user_id|]
 
 addUser :: Text -> Text -> Text -> H.Tx P.Postgres s ()
 addUser identity pass role = do
-  let Just hashed = unsafePerformIO $ hashPasswordUsingPolicy fastBcryptHashingPolicy (cs pass)
+  --if avoidHash == 1
+    --then 
+  let passValue = pass 
+    --else let Just passValue = unsafePerformIO $ hashPasswordUsingPolicy fastBcryptHashingPolicy (cs pass)
   H.unitEx $
     [H.stmt|insert into postgrest.auth (id, pass, rolname) values (?, ?, ?)|]
-      identity (cs hashed :: Text) role
+      identity (cs passValue :: Text) role
 
 signInRole :: Text -> Text -> H.Tx P.Postgres s LoginAttempt
 signInRole user pass = do
   u <- H.maybeEx $ [H.stmt|select id, pass, rolname from postgrest.auth where id = ?|] user
   return $ maybe LoginFailed (\r ->
-      let (uid, hashed, role) = r in
-      if checkPass hashed pass
+      let (uid, passValue, role) = r in
+      if checkPass passValue pass
          then LoginSuccess role uid
          else LoginFailed
     ) u
