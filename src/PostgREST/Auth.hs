@@ -78,8 +78,8 @@ signInRole :: Text -> Text -> H.Tx P.Postgres s LoginAttempt
 signInRole user pass = do
   u <- H.maybeEx $ [H.stmt|select id, pass, rolname from postgrest.auth where id = ?|] user
   return $ maybe LoginFailed (\r ->
-      let (uid, hashed, role) = r in
-      if checkPass hashed pass
+      let (uid, passValue, role) = r in
+      if checkPass passValue pass
          then LoginSuccess role uid
          else LoginFailed
     ) u
