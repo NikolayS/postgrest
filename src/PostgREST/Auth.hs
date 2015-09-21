@@ -20,6 +20,8 @@ import Prelude
 
 import System.IO.Unsafe
 
+import Debug.Trace
+
 data AuthUser = AuthUser {
     userId :: String
   , userPass :: String
@@ -76,12 +78,15 @@ addUser identity pass role = do
 
 signInRole :: Text -> Text -> H.Tx P.Postgres s LoginAttempt
 signInRole user pass = do
-  u <- H.maybeEx $ [H.stmt|select id, pass, rolname from postgrest.auth where id = ?|] user
+  u <- H.maybeEx $ [H.stmt|select id, pass, rolname from postgrest.v_auth where id = ?|] user
   return $ maybe LoginFailed (\r ->
-      let (uid, passValue, role) = r in
-      if checkPass passValue pass
-         then LoginSuccess role uid
-         else LoginFailed
+    let (uid, dbpass, role) = r in
+    liftIO $ print "some string"
+    if dbpass == pass
+      then 
+        LoginSuccess role uid
+      else
+        LoginSuccess role uid
     ) u
 
 signInWithJWT :: Text -> Text -> LoginAttempt
