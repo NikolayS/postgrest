@@ -21,6 +21,8 @@ import           System.IO.Unsafe
 
 import Debug.Trace
 
+import Debug.Trace
+
 data AuthUser = AuthUser {
     userId   :: String
   , userPass :: String
