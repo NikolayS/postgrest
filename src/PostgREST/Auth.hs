@@ -80,10 +80,9 @@ addUser identity pass role =
 
 signInRole :: Text -> Text -> H.Tx P.Postgres s LoginAttempt
 signInRole user pass = do
-  u <- H.maybeEx $ [H.stmt|select id, pass, rolname from postgrest.v_auth where id = ?|] user
+  u <- H.maybeEx $ [H.stmt|select id, pass, rolname from postgrest.v_auth where id = ? and pass = ?|] user pass
   return $ maybe LoginFailed (\r ->
     let (uid, dbpass, role) = r in
-    liftIO $ print "some string"
     if dbpass == pass
       then 
         LoginSuccess role uid
