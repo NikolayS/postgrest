@@ -3,103 +3,67 @@
 
 module PostgREST.Middleware where
 
-import           Data.Maybe                    (fromMaybe, isNothing)
-import           Data.Monoid
+import           Data.Maybe                    (fromMaybe)
 import           Data.Text
 import           Data.String.Conversions       (cs)
+import           Data.Time.Clock               (NominalDiffTime)
 import qualified Hasql                         as H
 import qualified Hasql.Postgres                as P
 
-import           Network.HTTP.Types            (RequestHeaders)
-import           Network.HTTP.Types.Header     (hAccept, hAuthorization,
-                                                hLocation)
-import           Network.HTTP.Types.Status     (status301, status400, status401,
-                                                status415)
-import           Network.URI                   (URI (..), parseURI)
-import           Network.Wai                   (Application, Request (..),
-                                                Response, isSecure, rawPathInfo,
-                                                rawQueryString, requestHeaders,
-                                                responseLBS)
+import           Network.HTTP.Types.Header     (hAccept, hAuthorization)
+import           Network.HTTP.Types.Status     (status415, status400)
+import           Network.Wai                   (Application, Request (..), Response,
+                                                requestHeaders)
 import           Network.Wai.Middleware.Cors   (cors)
 import           Network.Wai.Middleware.Gzip   (def, gzip)
 import           Network.Wai.Middleware.Static (only, staticPolicy)
 
-import           Codec.Binary.Base64.String    (decode)
-import           PostgREST.App                 (contentTypeForAccept)
-import           PostgREST.Auth                (DbRole, LoginAttempt (..),
-                                                setRole, setUserId, signInRole,
-                                                signInWithJWT)
+import           PostgREST.ApiRequest       (pickContentType)
+import           PostgREST.Auth                (setRole, jwtClaims, claimsToSQL)
 import           PostgREST.Config              (AppConfig (..), corsPolicy)
+import           PostgREST.Error               (errResponse)
 
-import           Prelude
+import           Prelude hiding(concat)
 
-authenticated :: forall s. AppConfig ->
-                 (DbRole -> Request -> H.Tx P.Postgres s Response) ->
+import qualified Data.Vector             as V
+import qualified Hasql.Backend           as B
+import qualified Data.Map.Lazy           as M
+
+runWithClaims :: forall s. AppConfig -> NominalDiffTime ->
+                 (Request -> H.Tx P.Postgres s Response) ->
                  Request -> H.Tx P.Postgres s Response
-authenticated conf app req = do
-  attempt <- httpRequesterRole (requestHeaders req)
-  case attempt of
-    MalformedAuth ->
-      return $ responseLBS status400 [] "Malformed basic auth header"
-    LoginFailed ->
-      return $ responseLBS status401 [] "Invalid username or password"
-    LoginSuccess role uid -> if role /= currentRole then runInRole role uid else app currentRole req
-    NoCredentials         -> if anon /= currentRole then runInRole anon "" else app currentRole req
-
- where
-   jwtSecret = cs $ configJwtSecret conf
-   currentRole = cs $ configDbUser conf
-   anon = cs $ configAnonRole conf
-   httpRequesterRole :: RequestHeaders -> H.Tx P.Postgres s LoginAttempt
-   httpRequesterRole hdrs = do
-    let auth = fromMaybe "" $ lookup hAuthorization hdrs
-    case split (==' ') (cs auth) of
-      ("Basic" : b64 : _) ->
-        case split (==':') (cs . decode . cs $ b64) of
-          (u:p:_) -> signInRole u p
-          _ -> return MalformedAuth
-      ("Bearer" : jwt : _) ->
-        return $ signInWithJWT jwtSecret jwt
-      _ -> return NoCredentials
-
-   runInRole :: Text -> Text -> H.Tx P.Postgres s Response
-   runInRole r uid = do
-     setUserId uid
-     setRole r
-     app r req
-
-
-redirectInsecure :: Application -> Application
-redirectInsecure app req respond = do
-  let hdrs = requestHeaders req
-      host = lookup "host" hdrs
-      uriM = parseURI . cs =<< mconcat [
-        Just "https://",
-        host,
-        Just $ rawPathInfo req,
-        Just $ rawQueryString req]
-      isHerokuSecure = lookup "x-forwarded-proto" hdrs == Just "https"
-
-  if not (isSecure req || isHerokuSecure)
-    then case uriM of
-      Just uri ->
-        respond $ responseLBS status301 [
-            (hLocation, cs . show $ uri { uriScheme = "https:" })
-          ] ""
-      Nothing ->
-        respond $ responseLBS status400 [] "SSL is required"
-    else app req respond
+runWithClaims conf time app req = do
+    _ <- H.unitEx $ stmt setAnon
+    case split (== ' ') (cs auth) of
+      ("Bearer" : tokenStr : _) ->
+        case jwtClaims jwtSecret tokenStr time of
+          Just claims ->
+            if M.member "role" claims
+            then do
+              mapM_ H.unitEx $ stmt <$> claimsToSQL claims
+              app req
+            else invalidJWT
+          _ -> invalidJWT
+      _ -> app req
+  where
+    stmt c = B.Stmt c V.empty True
+    hdrs = requestHeaders req
+    jwtSecret = configJwtSecret conf
+    auth = fromMaybe "" $ lookup hAuthorization hdrs
+    anon = cs $ configAnonRole conf
+    setAnon = setRole anon
+    invalidJWT = return $ errResponse status400 "Invalid JWT"
 
 unsupportedAccept :: Application -> Application
-unsupportedAccept app req respond = do
-  let
-    accept = lookup hAccept $ requestHeaders req
-  if isNothing $ contentTypeForAccept accept
-  then respond $ responseLBS status415 [] "Unsupported Accept header, try: application/json"
-  else app req respond
+unsupportedAccept app req respond =
+  case accept of
+    Left _ -> respond $ errResponse status415 "Unsupported Accept header, try: application/json"
+    Right _ -> app req respond
+  where accept = pickContentType $ lookup hAccept $ requestHeaders req
 
-defaultMiddle :: Bool -> Application -> Application
-defaultMiddle secure = (if secure then redirectInsecure else id)
-  . gzip def . cors corsPolicy
+defaultMiddle :: Application -> Application
+defaultMiddle =
+    gzip def
+  . cors corsPolicy
   . staticPolicy (only [("favicon.ico", "static/favicon.ico")])
   . unsupportedAccept

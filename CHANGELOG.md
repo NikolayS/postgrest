@@ -5,6 +5,53 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+### Fixed
+- Miscalculation of time used for expiring tokens - @calebmer
+- Remove bcrypt dependency to fix Windows build - @begriffs
+- Detect relations event when authenticator does not have rights to intermediate tables - @ruslantalpa 
+- Ensure db connections released on sigint - @begriffs
+
+### Added
+- Allow order by computed columns - @diogob
+- Set max rows in response with --max-rows - @begriffs
+
+## [0.3.0.1] - 2015-11-27
+
+### Fixed
+- Filter columns on embedded parent items - @ruslantalpa
+
+## [0.3.0.0] - 2015-11-24
+
+### Fixed
+- Use reasonable amount of memory during bulk inserts - @begriffs
+
+### Added
+- Ensure JWT expires - @calebmer
+- Postgres connection string argument - @calebmer
+- Encode JWT for procs that return type `jwt_claims` - @diogob
+- Full text operators `@>`,`<@` - @ruslantalpa
+- Shaping of the response body (filter columns, embed relations) with &select parameter for POST/PATCH - @ruslantalpa
+- Detect relationships between public views and private tables - @calebmer
+- `Prefer: plurality=singular` for selecting single objects - @calebmer
+
+### Removed
+- API versioning feature - @calebmer
+- `--db-x` command line arguments - @calebmer
+- Secure flag - @calebmer
+- PUT request handling - @ruslantalpa
+
+### Changed
+- Embed foreign keys with {} rather than () - @begriffs
+- Remove version number from binary filename in release - @begriffs
+
+## [0.2.12.1] - 2015-11-12
+
+### Fixed
+- Correct order for -> and ->> in a json path - @ruslantalpa
+- Return empty array instead of 500 when a set returning function returns an empty result set - @diogob
+
+## [0.2.12.0] - 2015-10-25
+
 ### Added
 - Embed associations, e.g. `/film?select=*,director(*)` - @ruslantalpa
 - Filter columns, e.g. `?select=col1,col2` - @ruslantalpa
@@ -12,6 +59,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Fixed
 - Tolerate a missing role in user creation - @calebmer
+- Avoid unnecessary text re-encoding - @ruslantalpa
 
 ## [0.2.11.1] - 2015-09-01
 

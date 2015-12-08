@@ -7,19 +7,11 @@ import Network.HTTP.Types
 import Network.Wai.Test (SResponse(simpleHeaders))
 
 import SpecHelper
+import Text.Heredoc
+
 
 spec :: Spec
-spec =
-  beforeAll (clearTable "items" >> createItems 15)
-   . beforeAll (clearTable "complex_items" >> createComplexItems)
-   . beforeAll (clearTable "nullable_integer" >> createNullInteger)
-   . beforeAll (
-       clearTable "no_pk" >>
-       createNulls 2 >>
-       createLikableStrings >>
-       createJsonData)
-   . afterAll_ (clearTable "items" >> clearTable "complex_items" >> clearTable "no_pk" >> clearTable "simple_pk")
-   . around withApp $ do
+spec = around (withApp cfgDefault) $ do
 
   describe "Querying a table with a column called count" $
     it "should not confuse count column with pg_catalog.count aggregate" $
@@ -127,18 +119,31 @@ spec =
         [json| [{"text_search_vector":"'baz':1 'qux':2"}] |]
 
     it "matches with computed column" $
-      get "/items?always_true=eq.true" `shouldRespondWith`
+      get "/items?always_true=eq.true&order=id.asc" `shouldRespondWith`
+        [json| [{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":6},{"id":7},{"id":8},{"id":9},{"id":10},{"id":11},{"id":12},{"id":13},{"id":14},{"id":15}] |]
+
+    it "order by computed column" $
+      get "/items?order=anti_id.desc" `shouldRespondWith`
         [json| [{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":6},{"id":7},{"id":8},{"id":9},{"id":10},{"id":11},{"id":12},{"id":13},{"id":14},{"id":15}] |]
 
     it "matches filtering nested items" $
-      get "/clients?select=id,projects(id,tasks(id,name))&projects.tasks.name=like.Design*" `shouldRespondWith`
+      get "/clients?select=id,projects{id,tasks{id,name}}&projects.tasks.name=like.Design*" `shouldRespondWith`
         "[{\"id\":1,\"projects\":[{\"id\":1,\"tasks\":[{\"id\":1,\"name\":\"Design w7\"}]},{\"id\":2,\"tasks\":[{\"id\":3,\"name\":\"Design w10\"}]}]},{\"id\":2,\"projects\":[{\"id\":3,\"tasks\":[{\"id\":5,\"name\":\"Design IOS\"}]},{\"id\":4,\"tasks\":[{\"id\":7,\"name\":\"Design OSX\"}]}]}]"
+
+    it "matches with @> operator" $
+      get "/complex_items?select=id&arr_data=@>.{2}" `shouldRespondWith`
+        [str|[{"id":2},{"id":3}]|]
+
+    it "matches with <@ operator" $
+      get "/complex_items?select=id&arr_data=<@.{1,2,4}" `shouldRespondWith`
+        [str|[{"id":1},{"id":2}]|]
+
 
   describe "Shaping response with select parameter" $ do
 
     it "selectStar works in absense of parameter" $
       get "/complex_items?id=eq.3" `shouldRespondWith`
-        "[{\"id\":3,\"name\":\"Three\",\"settings\":{\"foo\":{\"int\":1,\"bar\":\"baz\"}}}]"
+        [str|[{"id":3,"name":"Three","settings":{"foo":{"int":1,"bar":"baz"}},"arr_data":[1,2,3]}]|]
 
     it "one simple column" $
       get "/complex_items?select=id" `shouldRespondWith`
@@ -183,24 +188,56 @@ spec =
         [json| [{"int":1}] |] -- the value in the db is an int, but here we expect a string for now
 
     it "requesting parents and children" $
-      get "/projects?id=eq.1&select=id, name, clients(*), tasks(id, name)" `shouldRespondWith`
+      get "/projects?id=eq.1&select=id, name, clients{*}, tasks{id, name}" `shouldRespondWith`
         "[{\"id\":1,\"name\":\"Windows 7\",\"clients\":{\"id\":1,\"name\":\"Microsoft\"},\"tasks\":[{\"id\":1,\"name\":\"Design w7\"},{\"id\":2,\"name\":\"Code w7\"}]}]"
 
+    it "requesting parents and filtering parent columns" $
+      get "/projects?id=eq.1&select=id, name, clients{id}" `shouldRespondWith`
+        "[{\"id\":1,\"name\":\"Windows 7\",\"clients\":{\"id\":1}}]"
+
     it "requesting children 2 levels" $
-      get "/clients?id=eq.1&select=id,projects(id,tasks(id))" `shouldRespondWith`
+      get "/clients?id=eq.1&select=id,projects{id,tasks{id}}" `shouldRespondWith`
         "[{\"id\":1,\"projects\":[{\"id\":1,\"tasks\":[{\"id\":1},{\"id\":2}]},{\"id\":2,\"tasks\":[{\"id\":3},{\"id\":4}]}]}]"
 
     it "requesting many<->many relation" $
-      get "/tasks?select=id,users(id)" `shouldRespondWith`
+      get "/tasks?select=id,users{id}" `shouldRespondWith`
         "[{\"id\":1,\"users\":[{\"id\":1},{\"id\":3}]},{\"id\":2,\"users\":[{\"id\":1}]},{\"id\":3,\"users\":[{\"id\":1}]},{\"id\":4,\"users\":[{\"id\":1}]},{\"id\":5,\"users\":[{\"id\":2},{\"id\":3}]},{\"id\":6,\"users\":[{\"id\":2}]},{\"id\":7,\"users\":[{\"id\":2}]},{\"id\":8,\"users\":null}]"
 
     it "requesting parents and children on views" $
-      get "/projects_view?id=eq.1&select=id, name, clients(*), tasks(id, name)" `shouldRespondWith`
+      get "/projects_view?id=eq.1&select=id, name, clients{*}, tasks{id, name}" `shouldRespondWith`
         "[{\"id\":1,\"name\":\"Windows 7\",\"clients\":{\"id\":1,\"name\":\"Microsoft\"},\"tasks\":[{\"id\":1,\"name\":\"Design w7\"},{\"id\":2,\"name\":\"Code w7\"}]}]"
 
     it "requesting children with composite key" $
-      get "/users_tasks?user_id=eq.2&task_id=eq.6&select=*, comments(content)" `shouldRespondWith`
+      get "/users_tasks?user_id=eq.2&task_id=eq.6&select=*, comments{content}" `shouldRespondWith`
         "[{\"user_id\":2,\"task_id\":6,\"comments\":[{\"content\":\"Needs to be delivered ASAP\"}]}]"
+
+  describe "Plurality singular" $ do
+    it "will select an existing object" $
+      request methodGet "/items?id=eq.5" [("Prefer","plurality=singular")] ""
+        `shouldRespondWith` ResponseMatcher {
+          matchBody    = Just [json| {"id":5} |]
+        , matchStatus  = 200
+        , matchHeaders = []
+        }
+
+    it "works in the presence of a range header" $
+      let headers = ("Prefer","plurality=singular") :
+            rangeHdrs (ByteRangeFromTo 0 9) in
+      request methodGet "/items" headers ""
+        `shouldRespondWith` ResponseMatcher {
+          matchBody    = Just [json| {"id":1} |]
+        , matchStatus  = 200
+        , matchHeaders = []
+        }
+
+    it "will respond with 404 when not found" $
+      request methodGet "/items?id=eq.9999" [("Prefer","plurality=singular")] ""
+        `shouldRespondWith` 404
+
+    it "can shape plurality singular object routes" $
+      request methodGet "/projects_view?id=eq.1&select=id,name,clients{*},tasks{id,name}" [("Prefer","plurality=singular")] ""
+        `shouldRespondWith`
+          "{\"id\":1,\"name\":\"Windows 7\",\"clients\":{\"id\":1,\"name\":\"Microsoft\"},\"tasks\":[{\"id\":1,\"name\":\"Design w7\"},{\"id\":2,\"name\":\"Code w7\"}]}"
 
 
   describe "ordering response" $ do
@@ -272,7 +309,7 @@ spec =
       request methodGet "/simple_pk"
               (acceptHdrs "text/csv; version=1") ""
         `shouldRespondWith` ResponseMatcher {
-          matchBody    = Just "k,extra\rxyyx,u\rxYYx,v"
+          matchBody    = Just "k,extra\nxyyx,u\nxYYx,v"
         , matchStatus  = 200
         , matchHeaders = ["Content-Type" <:> "text/csv"]
         }
@@ -296,19 +333,26 @@ spec =
   describe "jsonb" $ do
     it "can filter by properties inside json column" $ do
       get "/json?data->foo->>bar=eq.baz" `shouldRespondWith`
-        [json| [{"data": {"foo": {"bar": "baz"}}}] |]
+        [json| [{"data": {"id": 1, "foo": {"bar": "baz"}}}] |]
       get "/json?data->foo->>bar=eq.fake" `shouldRespondWith`
         [json| [] |]
     it "can filter by properties inside json column using not" $
       get "/json?data->foo->>bar=not.eq.baz" `shouldRespondWith`
         [json| [] |]
+    it "can filter by properties inside json column using ->>" $
+      get "/json?data->>id=eq.1" `shouldRespondWith`
+        [json| [{"data": {"id": 1, "foo": {"bar": "baz"}}}] |]
 
   describe "remote procedure call" $ do
-    context "a proc that returns a set" . before_ (clearTable "items" >> createItems 10) .
-      after_ (clearTable "items") $
+    context "a proc that returns a set" $
       it "returns proper json" $
         post "/rpc/getitemrange" [json| { "min": 2, "max": 4 } |] `shouldRespondWith`
           [json| [ {"id": 3}, {"id":4} ] |]
+
+    context "a proc that returns an empty rowset" $
+      it "returns empty json array" $
+        post "/rpc/test_empty_rowset" [json| {} |] `shouldRespondWith`
+          [json| [] |]
 
     context "a proc that returns plain text" $
       it "returns proper json" $

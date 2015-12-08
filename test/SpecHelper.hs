@@ -12,8 +12,8 @@ import Data.String.Conversions (cs)
 import Data.Monoid
 import Data.Text hiding (map)
 import qualified Data.Vector as V
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Monad (void)
-import Control.Applicative
 
 import Network.HTTP.Types.Header (Header, ByteRange, renderByteRange,
                                   hRange, hAuthorization, hAccept)
@@ -23,83 +23,64 @@ import Data.Maybe (fromMaybe)
 import Text.Regex.TDFA ((=~))
 import qualified Data.ByteString.Char8 as BS
 import System.Process (readProcess)
-
-import qualified Data.Aeson.Types as J
+import Web.JWT (secret)
 
 import PostgREST.App (app)
 import PostgREST.Config (AppConfig(..))
 import PostgREST.Middleware
-import PostgREST.Error(errResponse)
-import PostgREST.PgStructure
-import PostgREST.Types
+import PostgREST.Error(pgErrResponse)
+import PostgREST.DbStructure
 
-isLeft :: Either a b -> Bool
-isLeft (Left _ ) = True
-isLeft _ = False
+dbString :: String
+dbString = "postgres://postgrest_test_authenticator@localhost:5432/postgrest_test"
 
-cfg :: AppConfig
-cfg = AppConfig "postgrest_test" 5432 "postgrest_test" "" "localhost" 3000 "postgrest_anonymous" False 10 "1" "safe"
+cfg :: String -> Maybe Int -> AppConfig
+cfg conStr = AppConfig conStr 3000 "postgrest_test_anonymous" "test" (secret "safe") 10
+
+cfgDefault :: AppConfig
+cfgDefault = cfg dbString Nothing
+
+cfgLimitRows :: Int -> AppConfig
+cfgLimitRows = cfg dbString . Just
 
 testPoolOpts :: PoolSettings
 testPoolOpts = fromMaybe (error "bad settings") $ H.poolSettings 1 30
 
 pgSettings :: P.Settings
-pgSettings = P.ParamSettings (cs $ configDbHost cfg)
-                             (fromIntegral $ configDbPort cfg)
-                             (cs $ configDbUser cfg)
-                             (cs $ configDbPass cfg)
-                             (cs $ configDbName cfg)
+pgSettings = P.StringSettings $ cs dbString
 
-withApp :: ActionWith Application -> IO ()
-withApp perform = do
+withApp :: AppConfig -> ActionWith Application -> IO ()
+withApp config perform = do
   pool :: H.Pool P.Postgres
     <- H.acquirePool pgSettings testPoolOpts
 
   let txSettings = Just (H.ReadCommitted, Just True)
-  metadata <- H.session pool $ H.tx txSettings $ do
-    tabs <- allTables
-    rels <- allRelations
-    cols <- allColumns rels
-    keys <- allPrimaryKeys
-    return (tabs, rels, cols, keys)
-
-  dbstructure <- case metadata of
-    Left e -> fail $ show e
-    Right (tabs, rels, cols, keys) ->
-      return $ DbStructure {
-          tables=tabs
-        , columns=cols
-        , relations=rels
-        , primaryKeys=keys
-        }
+  dbOrError <- H.session pool $ H.tx txSettings $ getDbStructure (cs $ configSchema config)
+  db <- either (fail . show) return dbOrError
 
   perform $ middle $ \req resp -> do
+    time <- getPOSIXTime
     body <- strictRequestBody req
     result <- liftIO $ H.session pool $ H.tx txSettings
-      $ authenticated cfg (app dbstructure cfg body) req
-    either (resp . errResponse) resp result
+      $ runWithClaims config time (app db config body) req
+    either (resp . pgErrResponse) resp result
 
-  where middle = defaultMiddle False
+  where middle = defaultMiddle
 
-
-resetDb :: IO ()
-resetDb = do
-  pool :: H.Pool P.Postgres
-    <- H.acquirePool pgSettings testPoolOpts
-  void . liftIO $ H.session pool $
-    H.tx Nothing $ do
-      H.unitEx [H.stmt| drop schema if exists "1" cascade |]
-      H.unitEx [H.stmt| drop schema if exists private cascade |]
-      H.unitEx [H.stmt| drop schema if exists postgrest cascade |]
-
+setupDb :: IO ()
+setupDb = do
+  void $ readProcess "psql" ["-d", "postgres", "-a", "-f", "test/fixtures/database.sql"] []
   loadFixture "roles"
   loadFixture "schema"
+  loadFixture "privileges"
+  resetDb
 
+resetDb :: IO ()
+resetDb = loadFixture "data"
 
 loadFixture :: FilePath -> IO()
 loadFixture name =
   void $ readProcess "psql" ["-U", "postgrest_test", "-d", "postgrest_test", "-a", "-f", "test/fixtures/" ++ name ++ ".sql"] []
-
 
 rangeHdrs :: ByteRange -> [Header]
 rangeHdrs r = [rangeUnit, (hRange, renderByteRange r)]
@@ -129,59 +110,4 @@ clearTable :: Text -> IO ()
 clearTable table = do
   pool <- testPool
   void . liftIO $ H.session pool $ H.tx Nothing $
-    H.unitEx $ B.Stmt ("delete from \"1\"."<>table) V.empty True
-
-createItems :: Int -> IO ()
-createItems n = do
-  pool <- testPool
-  void . liftIO $ H.session pool $ H.tx Nothing txn
-  where
-    txn = mapM_ H.unitEx stmts
-    stmts = map [H.stmt|insert into "1".items (id) values (?)|] [1..n]
-
-createComplexItems :: IO ()
-createComplexItems = do
-  pool <- testPool
-  void . liftIO $ H.session pool $ H.tx Nothing txn
-  where
-    txn = mapM_ H.unitEx stmts
-    stmts = getZipList $ [H.stmt|insert into "1".complex_items (id, name, settings) values (?,?,?)|]
-        <$> ZipList ([1..3]::[Int])
-        <*> ZipList (["One", "Two", "Three"]::[Text])
-        <*> ZipList ([jobj,jobj,jobj])
-    jobj = (J.object [("foo", J.object [("int", J.Number 1),("bar", J.String "baz")])])
-
-createNulls :: Int -> IO ()
-createNulls n = do
-  pool <- testPool
-  void . liftIO $ H.session pool $ H.tx Nothing txn
-  where
-    txn = mapM_ H.unitEx (stmt':stmts)
-    stmt' = [H.stmt|insert into "1".no_pk (a,b) values (null,null)|]
-    stmts = map [H.stmt|insert into "1".no_pk (a,b) values (?,0)|] [1..n]
-
-createNullInteger :: IO ()
-createNullInteger = do
-  pool <- testPool
-  void . liftIO $ H.session pool $ H.tx Nothing $
-    H.unitEx $ [H.stmt| insert into "1".nullable_integer (a) values (null) |]
-
-createLikableStrings :: IO ()
-createLikableStrings = do
-  pool <- testPool
-  void . liftIO $ H.session pool $ H.tx Nothing $ do
-    H.unitEx $ insertSimplePk "xyyx" "u"
-    H.unitEx $ insertSimplePk "xYYx" "v"
-  where
-    insertSimplePk :: Text -> Text -> H.Stmt P.Postgres
-    insertSimplePk = [H.stmt|insert into "1".simple_pk (k, extra) values (?,?)|]
-
-createJsonData :: IO ()
-createJsonData = do
-  pool <- testPool
-  void . liftIO $ H.session pool $ H.tx Nothing $
-    H.unitEx $
-      [H.stmt|
-        insert into "1".json (data) values (?)
-      |]
-      (J.object [("foo", J.object [("bar", J.String "baz")])])
+    H.unitEx $ B.Stmt ("truncate table test." <> table <> " cascade") V.empty True
